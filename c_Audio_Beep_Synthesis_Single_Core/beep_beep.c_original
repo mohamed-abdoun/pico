@@ -74,9 +74,6 @@ fix15 current_amplitude_1 = 0;      // current amplitude (modified in ISR)
 // State machine variables
 volatile unsigned int STATE_0 = 0;
 volatile unsigned int count_0 = 0;
-// === DEBUGGING: Added for tracking ===
-volatile unsigned int beep_count = 0;  // Track number of completed beeps
-volatile unsigned int last_state = 0; // Track state changes
 
 // SPI data
 uint16_t DAC_data_1; // output value
@@ -146,7 +143,6 @@ static void alarm_irq(void)
         {
             STATE_0 = 1;
             count_0 = 0;
-            beep_count++;  // === DEBUGGING: Increment beep counter ===
         }
     }
 
@@ -184,54 +180,11 @@ static PT_THREAD(protothread_core_0(struct pt *pt))
     PT_END(pt);
 }
 
-// ========================================================================
-// === DEBUGGING: Debug thread - prints status information ===
-// ========================================================================
-static PT_THREAD(protothread_debug(struct pt *pt))
-{
-    PT_BEGIN(pt);
-    printf("\n=== Debug Thread Started ===\n");
-    while (1)
-    {
-        // Print status information
-        printf("State: %d | Beeps: %d | Amplitude: %.3f | Count: %d | DAC: %d\n",
-               STATE_0, beep_count, fix2float15(current_amplitude_0), count_0, DAC_output_0);
-
-        // Check for state transitions
-        if (STATE_0 != last_state)
-        {
-            if (STATE_0 == 0)
-            {
-                printf(">>> STATE CHANGE: Starting beep #%d\n", beep_count + 1);
-            }
-            else
-            {
-                printf(">>> STATE CHANGE: Beep complete, entering silence period\n");
-            }
-            last_state = STATE_0;
-        }
-
-        // Yield for 1 second
-        PT_YIELD_usec(1000000);
-    }
-    PT_END(pt);
-}
-// ========================================================================
-
 // Core 0 entry point
 int main()
 {
     // Initialize stdio/uart (printf won't work unless you do this!)
     stdio_init_all();
-
-    // === DEBUGGING: Wait for USB serial connection ===
-    sleep_ms(2000);
-
-    // === DEBUGGING: Startup banner ===
-    printf("\n");
-    printf("================================================\n");
-    printf("  Audio Beep Synthesis - Single Core Demo\n");
-    printf("================================================\n");
     printf("Hello, friends!\n");
 
     // Initialize SPI channel (channel, baud rate set to 20MHz)
@@ -272,28 +225,6 @@ int main()
         sin_table[ii] = float2fix15(2047 * sin((float)ii * 6.283 / (float)sine_table_size));
     }
 
-    // === DEBUGGING: Print configuration parameters ===
-    printf("\n=== Configuration Parameters ===\n");
-    printf("Sample Rate (Fs): %d Hz\n", Fs);
-    printf("Beep Frequency: 400 Hz\n");
-    printf("ISR Period: %d us\n", DELAY);
-    printf("Attack Time: %d samples (%.1f ms)\n", ATTACK_TIME, (float)ATTACK_TIME * 1000.0 / Fs);
-    printf("Decay Time: %d samples (%.1f ms)\n", DECAY_TIME, (float)DECAY_TIME * 1000.0 / Fs);
-    printf("Sustain Time: %d samples (%.1f ms)\n", SUSTAIN_TIME, (float)SUSTAIN_TIME * 1000.0 / Fs);
-    printf("Beep Duration: %d samples (%.1f ms)\n", BEEP_DURATION, (float)BEEP_DURATION * 1000.0 / Fs);
-    printf("Beep Interval: %d samples (%.2f sec)\n", BEEP_REPEAT_INTERVAL, (float)BEEP_REPEAT_INTERVAL / Fs);
-    printf("Attack Increment: %.6f\n", fix2float15(attack_inc));
-    printf("Decay Increment: %.6f\n", fix2float15(decay_inc));
-    printf("Sine Table Size: %d entries\n", sine_table_size);
-    printf("\n=== GPIO Pin Configuration ===\n");
-    printf("SPI CS: GPIO %d\n", PIN_CS);
-    printf("SPI SCK: GPIO %d\n", PIN_SCK);
-    printf("SPI MOSI: GPIO %d\n", PIN_MOSI);
-    printf("LDAC: GPIO %d\n", LDAC);
-    printf("LED: GPIO %d\n", LED);
-    printf("ISR Timing: GPIO %d\n", ISR_GPIO);
-    printf("\n=== Starting System ===\n");
-
     // Enable the interrupt for the alarm (we're using Alarm 0)
     hw_set_bits(&timer_hw->inte, 1u << ALARM_NUM);
     // Associate an interrupt handler with the ALARM_IRQ
@@ -305,11 +236,6 @@ int main()
 
     // Add core 0 threads
     pt_add_thread(protothread_core_0);
-    pt_add_thread(protothread_debug);  // === DEBUGGING: Add debug thread ===
-
-    // === DEBUGGING: Thread start message ===
-    printf("Threads initialized. Starting scheduler...\n");
-    printf("Monitor output below for real-time status:\n\n");
 
     // Start scheduling core 0 threads
     pt_schedule_start;

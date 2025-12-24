@@ -63,9 +63,11 @@ typedef signed int fix15;
 #define DELAY 20 // 1/Fs (in microseconds)
 
 // the DDS units - core 0
+volatile float current_freq = 400.0; // frequency to be generated
+volatile unsigned int phase_incr_main_0;
 // Phase accumulator and phase increment. Increment sets output frequency.
 volatile unsigned int phase_accum_main_0;
-volatile unsigned int phase_incr_main_0 = (400.0 * two32) / Fs;
+// volatile unsigned int phase_incr_main_0 = (int)((current_freq * two32) / Fs);
 
 // DDS sine table (populated in main())
 #define sine_table_size 256
@@ -83,11 +85,11 @@ fix15 current_amplitude_0 = 0;      // current amplitude (modified in ISR)
 fix15 current_amplitude_1 = 0;      // current amplitude (modified in ISR)
 
 // Timing parameters for beeps (units of interrupts)
-#define ATTACK_TIME 250
-#define DECAY_TIME 250
-#define SUSTAIN_TIME 10000
-#define BEEP_DURATION 10500
-#define BEEP_REPEAT_INTERVAL 50000
+#define ATTACK_TIME 250            // Extended attack for smoother start
+#define DECAY_TIME 250             // Extended decay for smoother end
+#define SUSTAIN_TIME 48000         // Very long sustain
+#define BEEP_DURATION 6000         // Total: 1000ms beep (at 50kHz)
+#define BEEP_REPEAT_INTERVAL 15000 // 2 seconds between beep starts
 
 // State machine variables
 volatile unsigned int STATE_0 = 0;
@@ -121,68 +123,87 @@ uint16_t DAC_data_0; // output value
 // This timer ISR is called on core 0
 static void alarm_irq(void)
 {
-    // Assert a GPIO when we enter the interrupt
+    // Debug timing pin HIGH
     gpio_put(ISR_GPIO, 1);
 
-    // Clear the alarm irq
+    // Clear interrupt
     hw_clear_bits(&timer_hw->intr, 1u << ALARM_NUM);
 
-    // Reset the alarm register
+    // Re-arm alarm
     timer_hw->alarm[ALARM_NUM] = timer_hw->timerawl + DELAY;
 
     if (STATE_0 == 0)
     {
-        // DDS phase and sine table lookup
-        phase_accum_main_0 += phase_incr_main_0;
-        DAC_output_0 = fix2int15(multfix15(current_amplitude_0,
-                                           sin_table[phase_accum_main_0 >> 24])) +
-                       2048;
+        // ======================================================
+        // 1) UPDATE FREQUENCY → PHASE INCREMENT (DDS CORE CHANGE)
+        // ======================================================
+        phase_incr_main_0 = (uint32_t)((current_freq * two32) / Fs);
 
-        // Ramp up amplitude
+        // ======================================================
+        // 2) DDS PHASE ACCUMULATION + SINE LOOKUP
+        // ======================================================
+        phase_accum_main_0 += phase_incr_main_0;
+
+        DAC_output_0 =
+            fix2int15(multfix15(current_amplitude_0,
+                                sin_table[phase_accum_main_0 >> 24])) +
+            2048;
+
+        // ======================================================
+        // 3) AMPLITUDE ENVELOPE (ATTACK / DECAY)
+        // ======================================================
         if (count_0 < ATTACK_TIME)
         {
-            current_amplitude_0 = (current_amplitude_0 + attack_inc);
+            current_amplitude_0 += attack_inc;
         }
-        // Ramp down amplitude
-        else if (count_0 > BEEP_DURATION - DECAY_TIME)
+        else if (count_0 > (BEEP_DURATION - DECAY_TIME))
         {
-            current_amplitude_0 = (current_amplitude_0 - decay_inc);
+            current_amplitude_0 -= decay_inc;
         }
 
-        // Mask with DAC control bits
-        // *** CHANGED: Use 0xfff (12-bit mask) instead of 0xffff ***
-        DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0xfff));
+        // ======================================================
+        // 4) SEND SAMPLE TO DAC
+        // ======================================================
+        DAC_data_0 = (DAC_config_chan_B | (DAC_output_0 & 0x0FFF));
 
-        // *** CHANGED: Manual CS control for proper MCP4822 timing ***
-        gpio_put(PIN_CS, 0); // CS LOW (chip select active)
+        gpio_put(PIN_CS, 0);
         spi_write16_blocking(SPI_PORT, &DAC_data_0, 1);
-        gpio_put(PIN_CS, 1); // CS HIGH (latch data)
+        gpio_put(PIN_CS, 1);
 
-        // Increment the counter
-        count_0 += 1;
+        // ======================================================
+        // 5) FREQUENCY SWEEP (BEEP → WHISTLE)
+        // ======================================================
+        current_freq += 0.83f; // 0.05f; // Hz per sample (smooth upward sweep)
 
-        // State transition?
-        if (count_0 == BEEP_DURATION)
+        // ======================================================
+        // 6) TIMEKEEPING
+        // ======================================================
+        count_0++;
+
+        if (count_0 >= BEEP_DURATION)
         {
             STATE_0 = 1;
             count_0 = 0;
-            beep_count++; // === DEBUGGING: Increment beep counter ===
+            beep_count++;
         }
     }
-
-    // State transition?
     else
     {
-        count_0 += 1;
-        if (count_0 == BEEP_REPEAT_INTERVAL)
+        // Silence between chirps
+        count_0++;
+
+        if (count_0 >= BEEP_REPEAT_INTERVAL)
         {
-            current_amplitude_0 = 0;
             STATE_0 = 0;
             count_0 = 0;
+
+            // Reset for next chirp
+            current_freq = 400.0f;
+            current_amplitude_0 = 0;
         }
     }
 
-    // De-assert the GPIO when we leave the interrupt
+    // Debug timing pin LOW
     gpio_put(ISR_GPIO, 0);
 }
 
